@@ -1,6 +1,6 @@
-# Halo Python SDK
+# HALO Python SDK
 
-The official Python client for Halo API, featuring **x402 auto-payment middleware** that can be attached to any existing AI client.
+The official Python client for Halo API, featuring **x402 auto-payment middleware** that seamlessly handles payment requirements for AI models.
 
 > **👼 proper noun [HALO (Hyper-Available Lifeline Oracle)]**: 
 > A protocol where a dormant agent receives a temporary intelligence boost ("HALO") to survive a resource crunch (402 Error).
@@ -8,98 +8,103 @@ The official Python client for Halo API, featuring **x402 auto-payment middlewar
 ## Installation
 
 ```bash
+pip install halo-sdk
+# or install from source
 pip install .
 ```
 
-## Usage
+## Quick Start: Auto-Payment (Recommended)
 
-You can use your existing client initialization code. Just "attach" the Halo payment handler to enable auto-payment.
-
-### With Google Gemini SDK
+The easiest way to use HALO. Just wrap your existing model with `halo_system`. If a 402 error occurs, it automatically signs the payment using your private key and retries.
 
 ```python
-import google.generativeai as genai
-from halo import attach_payment
+import os
+from google import genai
+from halo import halo_system
 
-# 1. Configure your client normally (point to Halo URL)
-genai.configure(
-    api_key="sk-halo-...", # Your Halo API Key
-    transport='rest',
-    client_options={'api_endpoint': 'https://api.halo.com/v1'}
+# 1. Setup Client
+client = genai.Client(
+    api_key="sk-...", 
+    http_options={"base_url": "https://api.agihalo.com"}
 )
-model = genai.GenerativeModel('gemini-2.0-flash')
 
-# 2. Attach Auto-Payment Handler (The Magic ✨)
-attach_payment(
-    model, 
-    private_key="your-wallet-private-key", # Option A: Easiest
-    api_key="sk-halo-...",                 # Required for retrying requests
-    trusted_receivers=["0xHaloServerWalletAddress..."] 
+# 2. Attach HALO System (The Magic ✨)
+# Just pass your private key. 402 errors will be auto-resolved.
+halo_model = halo_system(
+    client.models, 
+    private_key="0xYOUR_PRIVATE_KEY",
+    api_key="sk-..."
 )
 
 # 3. Use as usual
-# If 402 happens, it will transparently pay and retry!
-response = model.generate_content("Hello world")
+# If credits run out, it automatically pays 1 USDC and returns the result.
+response = halo_model.generate_content(
+    model="gemini-2.0-flash-exp", 
+    contents="Hello, Halo!"
+)
 print(response.text)
 ```
 
-## Advanced: Secure Signer Callback (Recommended for Prod)
+## Advanced: TEE / Autonomous Agent Integration
 
-Instead of passing your Private Key to the SDK, you can provide a `signer` callback. This allows you to use a KMS, HSM, or other secure key management systems.
+For agents running in a Trusted Execution Environment (TEE) or those who want manual control over payments. You can use `HaloPaymentTools` as a toolset for your agent.
 
-```python
-def my_secure_signer(tx_dict):
-    """
-    Sign the transaction using your secure method.
-    Returns: Signed raw transaction hex string.
-    """
-    # Example: sign with KMS, Hardware Wallet, etc.
-    print(f"Signing transaction: {tx_dict}")
-    return custom_kms_sign(tx_dict)
-
-attach_payment(
-    model,
-    signer=my_secure_signer,       # Pass function, NOT key
-    wallet_address="0xMyAddress",  # Required for nonce lookup
-    api_key="sk-halo-..."
-)
-```
-
-## Advanced: HALO Protocol (Judge-Act Pattern)
-
-When your agent runs out of credits (Brain Deadlock), the SDK automatically activates the **HALO Protocol**.
-It consults a **free, system-provided Judge Model** (`gemini-2.0-flash-exp`) to decide whether to authorize the payment.
-The system issues a temporary **Rescue Token** during the 402 error, which authorizes this free model call securely.
+This enables the **Rescue Protocol**:
+1. Agent hits 402.
+2. Agent calls `consult_judge` (Free) to ask if it should pay.
+3. If Judge says "YES", Agent calls `sign_payment` (Paid) to generate a signature.
+4. Agent retries the request with the signature.
 
 ```python
-from halo import attach_payment, HALOSigner
+from halo import HaloPaymentTools
 
-# 1. Prepare Main Model
-big_brain = genai.GenerativeModel('gemini-2.0-flash-exp')
-
-# 2. Create HALO Signer (Zero-Config)
-# The system automatically provides the free judge model.
-halo_signer = HALOSigner(
-    private_key="your-key",
-    strategy="Approve only if related to physics" # Give the judge a strategy
+# 1. Initialize Tools inside TEE
+tools = HaloPaymentTools(
+    private_key="0xTEE_PRIVATE_KEY",
+    api_key="sk-...",
+    halo_url="https://api.agihalo.com"
 )
 
-# 3. Attach
-attach_payment(
-    big_brain,
-    signer=halo_signer,
-    wallet_address="0xYourWallet",
-    api_key="sk-halo-..."
-)
+# 2. Agent Logic (Simulation)
+try:
+    # ... make API call ...
+    raise Exception("402 Payment Required") # Simulated 402
+except Exception as e:
+    # 3. Agent decides to consult the Judge (Free Lifeline)
+    print("Agent: 'I'm out of credits. Should I pay?'")
+    decision = tools.consult_judge(
+        context="Calculating important physics data", 
+        amount_str="1.00 USDC"
+    )
+    
+    if "YES" in decision:
+        print("Agent: 'Judge approved. Signing payment...'")
+        
+        # 4. Generate Payment Signature
+        # (In real scenario, parse 'requirement' from 402 error header)
+        signature = tools.sign_payment(requirement_dict)
+        
+        # 5. Retry with Proof
+        # retry_request(headers={"Payment-Signature": signature})
+        print("Success!")
 ```
 
-## How It Works
+## Environment Variables
 
-1. `attach_payment` wraps your model instance with a Proxy.
-2. It intercepts method calls (like `generate_content`).
-3. If an error occurs, it checks if it's a `402 Payment Required`.
-4. It extracts the payment action (USDC transfer details).
-5. It executes the payment using your Key, Signer Callback, or **HALO Signer**.
-6. It retries the original request with the payment proof.
+You can configure the SDK using environment variables:
 
-# halo-python-sdk
+- `HALO_WALLET_PRIVATE_KEY`: Your Ethereum private key (for signing payments).
+- `HALO_API_KEY`: Your Halo API Key. **Get it at [www.apihalo.com](https://www.apihalo.com)**
+- `HALO_PROXY_URL`: Halo Proxy URL (default: `https://api.agihalo.com`).
+
+## Architecture
+
+1.  **Halo System (Auto Mode)**:
+    *   Wraps the model instance with a Proxy.
+    *   Intercepts `402 Payment Required` errors.
+    *   **Fast Track**: If `private_key` is provided directly, it skips the Judge and immediately signs/pays (latency optimized).
+    *   **Rescue Track**: If configured without a direct key (e.g., using a signer callback), it consults the Judge first.
+
+2.  **Halo Payment Tools (Manual Mode)**:
+    *   `consult_judge(context, amount)`: Uses `x-halo-rescue` header to access the Judge model for free.
+    *   `sign_payment(requirement)`: Generates an EIP-712 signature for USDC TransferWithAuthorization.

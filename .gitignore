@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.env
+
+# Distribution / Packaging
+dist/
+build/
+*.egg-info/
+
+# Tests
+test_*.py
+test/
+tests/
+examples/
+
+# Specific Test Files
+test_sdk.py
+test_tee_rescue.py
+test.py
+
