@@ -24,7 +24,7 @@ from halo import halo_system
 
 # 1. Setup Client
 client = genai.Client(
-    api_key="sk-...", 
+    api_key="sk-...", # Get your key at www.apihalo.com
     http_options={"base_url": "https://api.agihalo.com"}
 )
 
@@ -33,7 +33,7 @@ client = genai.Client(
 halo_model = halo_system(
     client.models, 
     private_key="0xYOUR_PRIVATE_KEY",
-    api_key="sk-..."
+    api_key="sk-..." # Get your key at www.apihalo.com
 )
 
 # 3. Use as usual
