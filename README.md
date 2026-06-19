@@ -45,6 +45,59 @@ response = halo_model.generate_content(
 print(response.text)
 ```
 
+## Long-Term Memory
+
+Memory is only enabled through the HALO SDK marker. Use `halo_memory_headers` on the proxied model request that should be captured.
+
+The memory project must already exist in Halo. `project_key` is the memory project key, not the Halo API key. `end_user_key` is your customer-side end-user id and is required.
+
+```python
+from halo import halo_memory_headers
+
+headers = halo_memory_headers(
+    project_key="customer-project-a",
+    end_user_key="end-user-123",
+    mode="capture",
+)
+
+# Pass `headers` through your provider client's per-request headers option.
+```
+
+This captures the user/assistant conversation from the proxied model call. Halo stores raw conversation memory on every captured exchange, while the memory worker summarizes/classifies raw entries in batches.
+
+For new retrieval integrations, declare `halo_retrieve_end_user_memory` in your own LLM client and execute Halo's memory API only when your model returns that function call:
+
+```python
+import requests
+
+response = requests.post(
+    "https://api.agihalo.com/api/v1/memory/functions/halo_retrieve_end_user_memory",
+    headers={
+        "Authorization": "Bearer sk-...",
+        "Content-Type": "application/json",
+    },
+    json={
+        "projectKey": "customer-project-a",
+        "endUserKey": "end-user-123",
+        "arguments": {
+            "sessionData": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "What should I follow up on today?",
+                    }
+                ]
+            },
+            "limit": 5,
+        },
+    },
+)
+```
+
+`session_key` is optional legacy metadata and is not used as Halo's retrieval index. If your integration does not use Halo's router, send current conversation state in `sessionData` when calling the function API.
+
+`retrieve=True` is the legacy router mode. It asks Halo to inject compact memory context and the function declaration into the proxied model request. New integrations should prefer user-side function declaration plus direct function API execution.
+
 ## Advanced: TEE / Autonomous Agent Integration
 
 For agents running in a Trusted Execution Environment (TEE) or those who want manual control over payments. You can use `HaloPaymentTools` as a toolset for your agent.
