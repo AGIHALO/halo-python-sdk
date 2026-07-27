@@ -45,11 +45,139 @@ response = halo_model.generate_content(
 print(response.text)
 ```
 
+## Project Authentication
+
+Use `HaloAuthClient` with a Project publishable key. The client returns access
+and refresh tokens to your application but does not persist them.
+
+```python
+from halo import HaloAuthClient
+
+auth = HaloAuthClient(publishable_key="pk-project")
+
+session = auth.sign_in_with_password(
+    "user@example.com",
+    "Secret123!",
+)
+refreshed = auth.refresh_session(session["refresh_token"])
+user = auth.get_user(refreshed["access_token"])
+```
+
+For Google, Apple, GitHub, or Microsoft sign-in, create an S256 PKCE pair and
+open the provider authorization URL:
+
+```python
+authorization_url = auth.build_provider_authorize_url(
+    provider="google",
+    redirect_to="https://app.example.com/auth/callback",
+    code_challenge=code_challenge,
+    state=state,
+)
+
+provider_session = auth.exchange_provider_code(
+    code=code,
+    code_verifier=code_verifier,
+    redirect_to="https://app.example.com/auth/callback",
+)
+```
+
+Services registered as HALO OAuth Apps use `HaloOAuthClient`:
+
+```python
+from halo import HaloOAuthClient
+
+oauth = HaloOAuthClient(
+    client_id="halo_client_...",
+    client_secret="server-only-secret",
+)
+authorize_url = oauth.build_authorize_url(
+    redirect_uri="https://service.example.com/callback",
+    scopes=["profile", "email"],
+    state=state,
+)
+tokens = oauth.exchange_code(
+    code=code,
+    redirect_uri="https://service.example.com/callback",
+)
+profile = oauth.get_user_info(tokens["access_token"])
+```
+
 ## Long-Term Memory
 
-Memory is only enabled through the HALO SDK marker. Use `halo_memory_headers` on the proxied model request that should be captured.
+For new integrations, use `HaloMemoryClient` directly. The memory client does not read API keys or project keys from environment variables; pass them explicitly from your server configuration.
 
 The memory project must already exist in Halo. `project_key` is the memory project key, not the Halo API key. `end_user_key` is your customer-side end-user id and is required.
+
+```python
+from halo import HaloMemoryClient
+
+memory = HaloMemoryClient(
+    api_key="sk-...",
+    project_key="customer-project-a",
+)
+
+# Add this declaration to your own LLM request tools/functions.
+memory_function = memory.function_declaration()
+```
+
+When your model returns a `halo_retrieve_end_user_memory` function call, execute it with Halo:
+
+```python
+halo_result = memory.execute_retrieve_function(
+    end_user_key="end-user-123",
+    session_data={
+        "messages": [
+            {
+                "role": "user",
+                "content": "What should I follow up on today?",
+            }
+        ],
+        "currentTask": "answering user question",
+    },
+    limit=5,
+)
+
+# Feed this back to your LLM as the tool/function response.
+tool_response = halo_result["functionResponse"]
+```
+
+After your LLM produces the final assistant answer, capture the exchange:
+
+```python
+memory.capture(
+    end_user_key="end-user-123",
+    session_data={
+        "messages": [
+            {
+                "role": "user",
+                "content": "What should I follow up on today?",
+            }
+        ],
+    },
+    response={
+        "role": "assistant",
+        "content": "You asked me to follow up on your weekly report draft.",
+    },
+)
+```
+
+You can also inspect memory directly without model function calling:
+
+```python
+memory.retrieve(
+    end_user_key="end-user-123",
+    topics=["report_preferences"],
+    limit=5,
+)
+
+memory.delete_topic(
+    end_user_key="end-user-123",
+    topic_key="report_preferences",
+    include_raw=False,
+)
+```
+
+Legacy router/proxy integrations can still use `halo_memory_headers` on proxied model requests:
 
 ```python
 from halo import halo_memory_headers
@@ -63,40 +191,36 @@ headers = halo_memory_headers(
 # Pass `headers` through your provider client's per-request headers option.
 ```
 
-This captures the user/assistant conversation from the proxied model call. Halo stores raw conversation memory on every captured exchange, while the memory worker summarizes/classifies raw entries in batches.
+`session_key` is optional legacy metadata and is not used as Halo's retrieval index. `retrieve=True` is the legacy router mode. It asks Halo to inject compact memory context and the function declaration into the proxied model request. New integrations should prefer user-side function declaration plus direct function API execution.
 
-For new retrieval integrations, declare `halo_retrieve_end_user_memory` in your own LLM client and execute Halo's memory API only when your model returns that function call:
+### OEM Service connections (Preview)
+
+Confirm that the connector rollout is enabled for your project before exposing
+this flow.
 
 ```python
-import requests
+memory.register_oauth_provider(
+    provider_key="google",
+    client_id="google-oauth-client-id",
+    client_secret="google-oauth-client-secret",
+    redirect_uri=(
+        "https://connect.your-oem.com/"
+        "api/v1/memory/oauth/callback/google"
+    ),
+)
 
-response = requests.post(
-    "https://api.agihalo.com/api/v1/memory/functions/halo_retrieve_end_user_memory",
-    headers={
-        "Authorization": "Bearer sk-...",
-        "Content-Type": "application/json",
-    },
-    json={
-        "projectKey": "customer-project-a",
-        "endUserKey": "end-user-123",
-        "arguments": {
-            "sessionData": {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "What should I follow up on today?",
-                    }
-                ]
-            },
-            "limit": 5,
-        },
-    },
+result = memory.start_oauth(
+    scope_id="memory-scope-uuid",
+    connector_id="google.calendar",
+    completion_mode="mobile_deep_link",
+    return_uri="your-oem-app://oauth/complete",
 )
 ```
 
-`session_key` is optional legacy metadata and is not used as Halo's retrieval index. If your integration does not use Halo's router, send current conversation state in `sessionData` when calling the function API.
+HALO keeps provider tokens server-side. The OEM receives connection state and
+capability IDs, not upstream access or refresh tokens.
 
-`retrieve=True` is the legacy router mode. It asks Halo to inject compact memory context and the function declaration into the proxied model request. New integrations should prefer user-side function declaration plus direct function API execution.
+See the complete guides at [docs.agihalo.com](https://docs.agihalo.com/).
 
 ## Advanced: TEE / Autonomous Agent Integration
 

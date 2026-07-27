@@ -15,11 +15,11 @@ build/
 # Tests
 test_*.py
 test/
-tests/
+tests/*
+!tests/*.py
 examples/
 
 # Specific Test Files
 test_sdk.py
 test_tee_rescue.py
 test.py
-

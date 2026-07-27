@@ -9,7 +9,7 @@ if os.path.exists("README.md"):
 
 setup(
     name="halo-sdk",
-    version="0.1.3",
+    version="0.1.4",
     packages=find_packages(),
     install_requires=[
         "requests>=2.25.0",
@@ -18,9 +18,14 @@ setup(
         "eth-account>=0.5.9"
     ],
     author="Halo Team",
-    description="Python SDK for Halo API with built-in x402 auto-payment",
+    url="https://docs.agihalo.com/sdks/python/",
+    project_urls={
+        "Documentation": "https://docs.agihalo.com/sdks/python/",
+        "Source": "https://github.com/AGIHALO/halo-python-sdk",
+    },
+    description="HALO SDK for Authentication, OAuth, Agent Memory, and x402 payments",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    keywords="halo, x402, payment, ai, llm, gemini",
+    keywords="halo, authentication, oauth, memory, x402, payment, ai, llm",
     python_requires=">=3.7",
 )
