@@ -1,3 +1,4 @@
+import copy
 import os
 import time
 import requests
@@ -7,6 +8,8 @@ import functools
 from web3 import Web3
 from eth_account import Account
 from eth_account.messages import encode_typed_data
+
+from .version import __version__
 
 DEFAULT_HALO_URL = "https://api.agihalo.com"
 HALO_SDK_NAME = "halo-python-sdk"
@@ -51,6 +54,7 @@ def halo_memory_headers(
 ) -> dict:
     headers = {
         "x-halo-sdk": HALO_SDK_NAME,
+        "x-halo-sdk-version": __version__,
         "x-halo-project-key": _clean_memory_project_key(project_key),
         "x-halo-end-user-key": _clean_memory_end_user_key(end_user_key),
     }
@@ -478,6 +482,7 @@ class HaloMemoryClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
             "x-halo-sdk": HALO_SDK_NAME,
+            "x-halo-sdk-version": __version__,
         }
 
     def _post(self, path: str, payload: dict) -> dict:
@@ -599,7 +604,7 @@ def halo_system(
             self._handler = handler
         def __getattr__(self, name):
             attr = getattr(self._target, name)
-            if callable(attr): return self._handler.wrap_method(attr, self._target)
+            if callable(attr): return self._handler.wrap_method(attr)
             return attr
             
     return HaloProxy(model, handler)
@@ -613,7 +618,7 @@ class HaloAutoHandler:
         # If a key is directly provided, assume 'Auto Approve Mode' and skip the Rescue step
         self.auto_approve = bool(private_key)
 
-    def wrap_method(self, method, model_instance):
+    def wrap_method(self, method):
         @functools.wraps(method)
         def wrapper(*args, **kwargs):
             try:
@@ -621,23 +626,58 @@ class HaloAutoHandler:
             except Exception as e:
                 # Attempt auto-recovery upon detecting 402
                 if "402" in str(e) or (hasattr(e, 'response') and getattr(e.response, 'status_code', 0) == 402):
-                    return self._auto_recover(e, args, kwargs)
+                    return self._auto_recover(e, method, args, kwargs)
                 raise e
         return wrapper
 
-    def _auto_recover(self, e, args, kwargs):
+    def _auto_recover(self, e, method, args, kwargs):
         # 1. Extract Requirements
         req_data = self._extract_req(e)
         if not req_data: raise e
-        
-        requirement = req_data['accepts'][0]
-        resource = req_data['resource']
-        amount_str = requirement.get('amount') or requirement.get('maxAmountRequired')
+
+        accepts = req_data.get("accepts")
+        if not isinstance(accepts, list) or not accepts:
+            raise HaloAPIError(
+                "Halo 402 response did not include payment requirements"
+            )
+        requirement = next(
+            (
+                item
+                for item in accepts
+                if isinstance(item, dict) and item.get("scheme") == "exact"
+            ),
+            None,
+        )
+        if requirement is None:
+            raise HaloAPIError(
+                "Halo 402 response did not include a supported exact payment"
+            )
+
+        price = requirement.get("price")
+        price = price if isinstance(price, dict) else {}
+        amount_str = (
+            requirement.get("amount")
+            or requirement.get("maxAmountRequired")
+            or price.get("amount")
+        )
+        resource = req_data.get("resource")
+        if isinstance(resource, dict):
+            resource_description = (
+                resource.get("description")
+                or resource.get("url")
+                or "HALO API request"
+            )
+        elif isinstance(resource, str) and resource.strip():
+            resource_description = resource.strip()
+        else:
+            resource_description = "HALO API request"
         
         # 2. Rescue (Judgment) Step
         if not self.auto_approve:
             # Consult the Judge only if no key is present or an external signer is used (Rescue Protocol)
-            decision = self.tools.consult_judge(resource['description'], amount_str)
+            decision = self.tools.consult_judge(
+                resource_description, str(amount_str)
+            )
             if "YES" not in decision: raise Exception("Judge denied payment.")
         else:
             print(f"⚡ [AutoPay] Private Key detected -> Skipping Rescue, proceeding with immediate payment ({amount_str}).")
@@ -646,28 +686,72 @@ class HaloAutoHandler:
         signature = self.tools.sign_payment(requirement)
         
         # 4. Retry Step
-        return self._retry(signature, args, kwargs)
+        return self._retry(method, signature, args, kwargs)
     
     def _extract_req(self, e):
-        if hasattr(e, 'response') and 'payment-required' in e.response.headers:
-            return json.loads(base64.b64decode(e.response.headers['payment-required']))
-        return None
+        response = getattr(e, "response", None)
+        headers = getattr(response, "headers", None)
+        if headers is None:
+            return None
+        encoded = headers.get("payment-required") or headers.get(
+            "Payment-Required"
+        )
+        if not encoded:
+            return None
+        try:
+            if isinstance(encoded, str):
+                encoded = encoded.encode("ascii")
+            encoded += b"=" * (-len(encoded) % 4)
+            decoded = base64.b64decode(
+                encoded,
+                altchars=b"-_",
+                validate=True,
+            )
+            payload = json.loads(decoded.decode("utf-8"))
+        except (ValueError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
+            raise HaloAPIError(
+                "Halo 402 payment-required header was invalid"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise HaloAPIError(
+                "Halo 402 payment-required header was invalid"
+            )
+        return payload
 
-    def _retry(self, signature, args, kwargs):
-        url = f"{self.tools.halo_url}/v1beta/models/gemini-3-flash-preview:generateContent?key={self.tools.api_key}"
-        headers = { "Content-Type": "application/json", "Payment-Signature": signature }
-        contents = args[0] if len(args) > 0 else kwargs.get('contents')
-        payload = { "contents": [{"parts": [{"text": contents}]}] if isinstance(contents, str) else contents }
-        
-        print(f"🚀 [Retry] Retrying with payment proof...")
-        res = requests.post(url, headers=headers, json=payload)
-        if res.status_code != 200: raise Exception(f"Retry failed: {res.text}")
-        return SimpleResponse(res.json())
+    def _retry(self, method, signature, args, kwargs):
+        retry_kwargs = dict(kwargs)
+        original_config = retry_kwargs.get("config")
+        if original_config is None:
+            config = {}
+        elif isinstance(original_config, dict):
+            config = copy.deepcopy(original_config)
+        elif hasattr(original_config, "model_dump"):
+            config = original_config.model_dump(exclude_none=True)
+        else:
+            raise HaloAPIError(
+                "halo_system can only retry methods with a dict-compatible config"
+            )
 
-class SimpleResponse:
-    def __init__(self, data):
-        try: self.text = data['candidates'][0]['content']['parts'][0]['text']
-        except: self.text = ""
+        original_http_options = config.get("http_options")
+        if original_http_options is None:
+            http_options = {}
+        elif isinstance(original_http_options, dict):
+            http_options = copy.deepcopy(original_http_options)
+        elif hasattr(original_http_options, "model_dump"):
+            http_options = original_http_options.model_dump(exclude_none=True)
+        else:
+            raise HaloAPIError(
+                "halo_system can only retry methods with dict-compatible http_options"
+            )
+
+        headers = dict(http_options.get("headers") or {})
+        headers["Payment-Signature"] = signature
+        http_options["headers"] = headers
+        config["http_options"] = http_options
+        retry_kwargs["config"] = config
+
+        print("🚀 [Retry] Retrying the original request with payment proof...")
+        return method(*args, **retry_kwargs)
 
 # ============================================================================
 # 2. Halo Payment Tools (For TEE / Manual Integration)
@@ -717,21 +801,80 @@ class HaloPaymentTools:
         [PAID] Tool to generate an actual signature after approval. (EIP-712)
         """
         if not self.account: raise Exception("No private key for signing.")
-        
-        # EIP-712 Signing Logic (Same as before)
-        amount = int(requirement.get('amount') or requirement.get('maxAmountRequired'))
+
+        if not isinstance(requirement, dict):
+            raise ValueError("requirement must be a dictionary")
+        if requirement.get("scheme") != "exact":
+            raise ValueError("Only exact x402 payment requirements are supported")
+
+        price = requirement.get("price")
+        price = price if isinstance(price, dict) else {}
+        raw_amount = (
+            requirement.get("amount")
+            or requirement.get("maxAmountRequired")
+            or price.get("amount")
+        )
+        raw_asset = requirement.get("asset") or price.get("asset")
+        raw_pay_to = requirement.get("payTo")
+        if raw_amount is None:
+            raise ValueError("x402 payment amount is required")
+        if raw_asset is None:
+            raise ValueError("x402 payment asset is required")
+        if raw_pay_to is None:
+            raise ValueError("x402 payment recipient is required")
+
+        amount = int(raw_amount)
+        if amount <= 0:
+            raise ValueError("x402 payment amount must be greater than zero")
+
+        network = requirement.get("network")
+        if network == "base":
+            chain_id = 8453
+        elif (
+            isinstance(network, str)
+            and network.startswith("eip155:")
+            and network.removeprefix("eip155:").isdigit()
+        ):
+            chain_id = int(network.removeprefix("eip155:"))
+        else:
+            raise ValueError(
+                "x402 network must be base or an eip155 CAIP-2 identifier"
+            )
+        if chain_id <= 0:
+            raise ValueError("x402 chain ID must be greater than zero")
+
+        try:
+            max_timeout_seconds = int(requirement["maxTimeoutSeconds"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "x402 maxTimeoutSeconds must be a positive integer"
+            ) from exc
+        if max_timeout_seconds <= 0:
+            raise ValueError(
+                "x402 maxTimeoutSeconds must be a positive integer"
+            )
+
+        extra = requirement.get("extra")
+        if not isinstance(extra, dict):
+            extra = price.get("extra")
+        if not isinstance(extra, dict):
+            extra = {}
+
+        asset = Web3.to_checksum_address(raw_asset)
+        pay_to = Web3.to_checksum_address(raw_pay_to)
         import secrets
-        valid_after, valid_before = int(time.time()) - 60, int(time.time()) + 3600
+        valid_after = int(time.time()) - 60
+        valid_before = int(time.time()) + max_timeout_seconds
         nonce_hex = secrets.token_hex(32)
         
         domain = {
-            "name": requirement.get("extra", {}).get("name", "USD Coin"),
-            "version": requirement.get("extra", {}).get("version", "2"),
-            "chainId": 8453,
-            "verifyingContract": Web3.to_checksum_address(requirement['asset'])
+            "name": extra.get("name", "USD Coin"),
+            "version": extra.get("version", "2"),
+            "chainId": chain_id,
+            "verifyingContract": asset,
         }
         message = {
-            "from": self.account.address, "to": Web3.to_checksum_address(requirement['payTo']),
+            "from": self.account.address, "to": pay_to,
             "value": amount, "validAfter": valid_after, "validBefore": valid_before,
             "nonce": Web3.to_bytes(hexstr=nonce_hex)
         }
@@ -752,7 +895,7 @@ class HaloPaymentTools:
             "payload": {
                 "signature": signature,
                 "authorization": {
-                    "from": self.account.address, "to": Web3.to_checksum_address(requirement['payTo']),
+                    "from": self.account.address, "to": pay_to,
                     "value": str(amount), "validAfter": str(valid_after), "validBefore": str(valid_before),
                     "nonce": "0x" + nonce_hex
                 }

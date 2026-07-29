@@ -1,11 +1,53 @@
+import base64
+import hashlib
+import re
+import secrets
+from typing import NamedTuple
 from urllib.parse import urlencode
 
 import requests
 
 from .client import DEFAULT_HALO_URL, HaloAPIError
+from .version import __version__
 
 
 HALO_SDK_NAME = "halo-python-sdk"
+_PKCE_CHALLENGE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}$")
+_PKCE_VERIFIER_PATTERN = re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
+
+
+class HaloPkcePair(NamedTuple):
+    """S256 PKCE values that must be kept together for one authorization flow."""
+
+    verifier: str
+    challenge: str
+
+
+def generate_pkce_pair():
+    """Generate an RFC 7636 verifier and its S256 base64url challenge."""
+
+    verifier = secrets.token_urlsafe(64)
+    challenge = (
+        base64.urlsafe_b64encode(
+            hashlib.sha256(verifier.encode("ascii")).digest()
+        )
+        .rstrip(b"=")
+        .decode("ascii")
+    )
+    return HaloPkcePair(verifier=verifier, challenge=challenge)
+
+
+def generate_oauth_state(byte_length=32):
+    """Generate opaque state for binding an OAuth callback to its request."""
+
+    if (
+        not isinstance(byte_length, int)
+        or isinstance(byte_length, bool)
+        or byte_length < 16
+        or byte_length > 128
+    ):
+        raise ValueError("byte_length must be an integer between 16 and 128")
+    return secrets.token_urlsafe(byte_length)
 
 
 def _required_string(value, field_name):
@@ -19,6 +61,33 @@ def _optional_string(value):
         return None
     cleaned = value.strip()
     return cleaned or None
+
+
+def _optional_bounded_string(value, field_name, max_length):
+    cleaned = _optional_string(value)
+    if cleaned is not None and len(cleaned) > max_length:
+        raise ValueError(
+            f"{field_name} must be {max_length} characters or less"
+        )
+    return cleaned
+
+
+def _required_pkce_challenge(value):
+    challenge = _required_string(value, "code_challenge")
+    if not _PKCE_CHALLENGE_PATTERN.fullmatch(challenge):
+        raise ValueError(
+            "code_challenge must be a 43-character S256 base64url value"
+        )
+    return challenge
+
+
+def _required_pkce_verifier(value):
+    verifier = _required_string(value, "code_verifier")
+    if not _PKCE_VERIFIER_PATTERN.fullmatch(verifier):
+        raise ValueError(
+            "code_verifier must be 43-128 RFC 7636 unreserved characters"
+        )
+    return verifier
 
 
 def _clean_scopes(scopes):
@@ -43,6 +112,7 @@ class _HaloJsonClient:
         request_headers = {
             "Accept": "application/json",
             "x-halo-sdk": HALO_SDK_NAME,
+            "x-halo-sdk-version": __version__,
         }
         request_headers.update(headers or {})
         if payload is not None:
@@ -59,16 +129,19 @@ class _HaloJsonClient:
         except requests.RequestException as exc:
             raise HaloAPIError(f"Halo API request failed: {exc}") from exc
 
+        response_text = getattr(response, "text", "") or ""
         try:
             body = response.json()
         except ValueError:
-            body = getattr(response, "text", "")
-            if 200 <= response.status_code < 300:
+            body = response_text
+            if 200 <= response.status_code < 300 and response_text.strip():
                 raise HaloAPIError(
                     "Halo API response was not valid JSON",
                     status_code=response.status_code,
                     response_body=body,
                 )
+            if 200 <= response.status_code < 300:
+                return None
 
         if response.status_code < 200 or response.status_code >= 300:
             message = (
@@ -199,13 +272,14 @@ class HaloAuthClient(_HaloJsonClient):
         query = {
             "apikey": self.publishable_key,
             "redirect_to": _required_string(redirect_to, "redirect_to"),
-            "code_challenge": _required_string(
-                code_challenge, "code_challenge"
-            ),
+            "code_challenge": _required_pkce_challenge(code_challenge),
             "code_challenge_method": "S256",
         }
-        if _optional_string(state):
-            query["state"] = state.strip()
+        normalized_state = _optional_bounded_string(
+            state, "state", 1024
+        )
+        if normalized_state:
+            query["state"] = normalized_state
         provider_key = _required_string(provider, "provider")
         return (
             f"{self.halo_url}/api/v1/auth/providers/"
@@ -219,9 +293,7 @@ class HaloAuthClient(_HaloJsonClient):
             "/api/v1/auth/providers/token",
             payload={
                 "code": _required_string(code, "code"),
-                "code_verifier": _required_string(
-                    code_verifier, "code_verifier"
-                ),
+                "code_verifier": _required_pkce_verifier(code_verifier),
                 "redirect_to": _required_string(
                     redirect_to, "redirect_to"
                 ),
@@ -270,10 +342,13 @@ class HaloOAuthClient(_HaloJsonClient):
             "redirect_uri": _required_string(redirect_uri, "redirect_uri"),
             "scope": " ".join(_clean_scopes(scopes)),
         }
-        if _optional_string(state):
-            query["state"] = state.strip()
+        normalized_state = _optional_bounded_string(state, "state", 512)
+        if normalized_state:
+            query["state"] = normalized_state
         if _optional_string(code_challenge):
-            query["code_challenge"] = code_challenge.strip()
+            query["code_challenge"] = _required_pkce_challenge(
+                code_challenge
+            )
             query["code_challenge_method"] = "S256"
         return f"{self.halo_url}/api/v1/auth/oauth/authorize?{urlencode(query)}"
 
@@ -304,10 +379,13 @@ class HaloOAuthClient(_HaloJsonClient):
             "redirect_uri": _required_string(redirect_uri, "redirect_uri"),
             "scopes": _clean_scopes(scopes),
         }
-        if _optional_string(state):
-            payload["state"] = state.strip()
+        normalized_state = _optional_bounded_string(state, "state", 512)
+        if normalized_state:
+            payload["state"] = normalized_state
         if _optional_string(code_challenge):
-            payload["code_challenge"] = code_challenge.strip()
+            payload["code_challenge"] = _required_pkce_challenge(
+                code_challenge
+            )
             payload["code_challenge_method"] = "S256"
         return self._request(
             "POST",
@@ -330,7 +408,9 @@ class HaloOAuthClient(_HaloJsonClient):
         if self.client_secret:
             payload["client_secret"] = self.client_secret
         if _optional_string(code_verifier):
-            payload["code_verifier"] = code_verifier.strip()
+            payload["code_verifier"] = _required_pkce_verifier(
+                code_verifier
+            )
         return self._request(
             "POST", "/api/v1/auth/oauth/token", payload=payload
         )

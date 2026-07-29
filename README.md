@@ -1,8 +1,9 @@
 # HALO Python SDK
 
-The official Python client for Halo API, featuring **x402 auto-payment middleware** that seamlessly handles payment requirements for AI models.
+The official Python client for HALO Project Authentication, OAuth Apps,
+long-term Memory, and server-driven x402 payments.
 
-> **👼 proper noun [HALO (Hyper-Available Lifeline Oracle)]**: 
+> **👼 proper noun [HALO (Hyper-Available Lifeline Oracle)]**:
 > A protocol where a dormant agent receives a temporary intelligence boost ("HALO") to survive a resource crunch (402 Error).
 
 ## Installation
@@ -13,42 +14,83 @@ pip install halo-sdk
 pip install .
 ```
 
-## Quick Start: Auto-Payment (Recommended)
+Python 3.9 or newer is required.
 
-The easiest way to use HALO. Just wrap your existing model with `halo_system`. If a 402 error occurs, it automatically signs the payment using your private key and retries.
+## What's included in 0.2.0
+
+- Project user signup, password sessions, rotating refresh tokens, recovery,
+  JWKS, and upstream provider login
+- OAuth App authorization-code, PKCE, refresh-token, and user-info flows
+- Direct Memory capture, retrieve, deletion, and function execution
+- Server-driven x402 signing that uses the `payTo`, network, asset, amount, and
+  timeout returned by `https://api.agihalo.com`
+
+## Model Gateway
+
+HALO exposes an OpenAI-compatible production endpoint. Use the OpenAI package
+for model calls and this package for HALO Authentication, Memory, and x402
+helpers.
+
+```bash
+pip install openai
+```
+
+```python
+import os
+from openai import OpenAI
+
+halo = OpenAI(
+    api_key=os.environ["HALO_API_KEY"],
+    base_url="https://api.agihalo.com/openai/v1",
+)
+
+response = halo.chat.completions.create(
+    model="gpt-5-mini",
+    messages=[{"role": "user", "content": "Reply with one word: ready"}],
+)
+print(response.choices[0].message.content)
+```
+
+## x402 Auto-Payment
+
+Wrap a `google-genai` model client with `halo_system`. When the HALO API
+returns 402, the wrapper signs the server-provided payment requirement and
+retries the original model, contents, config, and request headers with the
+payment proof.
 
 ```python
 import os
 from google import genai
 from halo import halo_system
 
-# 1. Setup Client
+api_key = os.environ["HALO_API_KEY"]
 client = genai.Client(
-    api_key="sk-...", # Get your key at www.apihalo.com
-    http_options={"base_url": "https://api.agihalo.com"}
+    api_key=api_key,
+    http_options={"base_url": "https://api.agihalo.com"},
 )
 
-# 2. Attach HALO System (The Magic ✨)
-# Just pass your private key. 402 errors will be auto-resolved.
 halo_model = halo_system(
-    client.models, 
-    private_key="0xYOUR_PRIVATE_KEY",
-    api_key="sk-..." # Get your key at www.apihalo.com
+    client.models,
+    private_key=os.environ["HALO_WALLET_PRIVATE_KEY"],
+    api_key=api_key,
 )
 
-# 3. Use as usual
-# If credits run out, it automatically pays 1 USDC and returns the result.
 response = halo_model.generate_content(
-    model="gemini-2.0-flash-exp", 
-    contents="Hello, Halo!"
+    model="gemini-3.5-flash",
+    contents="Hello, HALO!",
 )
 print(response.text)
 ```
 
+The SDK does not contain a platform receive-wallet constant. It signs the
+`payTo` value delivered by the trusted HALO 402 response, so a server-side
+wallet rotation does not require a Python package update.
+
 ## Project Authentication
 
 Use `HaloAuthClient` with a Project publishable key. The client returns access
-and refresh tokens to your application but does not persist them.
+and refresh tokens to your application but does not persist them. Replace the
+stored refresh token after every successful refresh because HALO rotates it.
 
 ```python
 from halo import HaloAuthClient
@@ -63,33 +105,45 @@ refreshed = auth.refresh_session(session["refresh_token"])
 user = auth.get_user(refreshed["access_token"])
 ```
 
-For Google, Apple, GitHub, or Microsoft sign-in, create an S256 PKCE pair and
-open the provider authorization URL:
+For Google, Apple, GitHub, or Microsoft sign-in, generate an S256 PKCE pair and
+state, retain the verifier and state in the application session, then open the
+provider authorization URL:
 
 ```python
+from halo import generate_oauth_state, generate_pkce_pair
+
+pkce = generate_pkce_pair()
+state = generate_oauth_state()
+
 authorization_url = auth.build_provider_authorize_url(
     provider="google",
     redirect_to="https://app.example.com/auth/callback",
-    code_challenge=code_challenge,
+    code_challenge=pkce.challenge,
     state=state,
 )
 
+# After validating the returned state:
 provider_session = auth.exchange_provider_code(
     code=code,
-    code_verifier=code_verifier,
+    code_verifier=pkce.verifier,
     redirect_to="https://app.example.com/auth/callback",
 )
 ```
 
+In a web application, keep refresh tokens in a Secure, HttpOnly,
+SameSite-protected application cookie behind a BFF. Do not place access or
+refresh tokens in URLs, logs, localStorage, or sessionStorage.
+
 Services registered as HALO OAuth Apps use `HaloOAuthClient`:
 
 ```python
-from halo import HaloOAuthClient
+from halo import HaloOAuthClient, generate_oauth_state
 
 oauth = HaloOAuthClient(
     client_id="halo_client_...",
     client_secret="server-only-secret",
 )
+state = generate_oauth_state()
 authorize_url = oauth.build_authorize_url(
     redirect_uri="https://service.example.com/callback",
     scopes=["profile", "email"],
@@ -271,7 +325,7 @@ except Exception as e:
 You can configure the SDK using environment variables:
 
 - `HALO_WALLET_PRIVATE_KEY`: Your Ethereum private key (for signing payments).
-- `HALO_API_KEY`: Your Halo API Key. **Get it at [www.apihalo.com](https://www.apihalo.com)**
+- `HALO_API_KEY`: Your HALO client key. Create one at [app.agihalo.com](https://app.agihalo.com/).
 - `HALO_PROXY_URL`: Halo Proxy URL (default: `https://api.agihalo.com`).
 
 ## Architecture
@@ -279,6 +333,8 @@ You can configure the SDK using environment variables:
 1.  **Halo System (Auto Mode)**:
     *   Wraps the model instance with a Proxy.
     *   Intercepts `402 Payment Required` errors.
+    *   Uses the payment recipient and settlement parameters returned by the HALO API instead of a wallet embedded in the SDK.
+    *   Retries the original model request with `Payment-Signature`; it does not replace the requested model.
     *   **Fast Track**: If `private_key` is provided directly, it skips the Judge and immediately signs/pays (latency optimized).
     *   **Rescue Track**: If configured without a direct key (e.g., using a signer callback), it consults the Judge first.
 
