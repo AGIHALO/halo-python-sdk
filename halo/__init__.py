@@ -8,8 +8,12 @@ from .client import (
 )
 from .auth import (
     HaloAuthClient,
+    HaloAuthSubscription,
+    HaloClient,
+    HaloManagedAuth,
     HaloOAuthClient,
     HaloPkcePair,
+    create_client,
     generate_oauth_state,
     generate_pkce_pair,
 )
@@ -18,12 +22,16 @@ from .version import __version__
 __all__ = [
     "HaloAPIError",
     "HaloAuthClient",
+    "HaloAuthSubscription",
+    "HaloClient",
+    "HaloManagedAuth",
     "HaloMemoryClient",
     "HaloOAuthClient",
     "HaloPaymentTools",
     "HaloPkcePair",
     "MEMORY_RETRIEVE_FUNCTION_NAME",
     "__version__",
+    "create_client",
     "generate_oauth_state",
     "generate_pkce_pair",
     "halo_memory_headers",

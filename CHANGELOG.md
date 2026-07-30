@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0 - 2026-07-30
+
+- Added `create_client(url, publishable_key).auth` with managed Project
+  Authentication sessions.
+- Added automatic publishable-key and bearer-token handling, refresh-token
+  rotation, optional session storage, and auth-state subscriptions.
+- Kept `HaloAuthClient` and `HaloOAuthClient` backward compatible for explicit
+  server-side token handling.
+
 ## 0.2.0 - 2026-07-29
 
 - Added production Project Authentication and upstream identity-provider

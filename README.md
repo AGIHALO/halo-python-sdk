@@ -16,8 +16,9 @@ pip install .
 
 Python 3.9 or newer is required.
 
-## What's included in 0.2.0
+## What's included in 0.3.0
 
+- Supabase-style `create_client(url, publishable_key).auth` session management
 - Project user signup, password sessions, rotating refresh tokens, recovery,
   JWKS, and upstream provider login
 - OAuth App authorization-code, PKCE, refresh-token, and user-info flows
@@ -88,51 +89,48 @@ wallet rotation does not require a Python package update.
 
 ## Project Authentication
 
-Use `HaloAuthClient` with a Project publishable key. The client returns access
-and refresh tokens to your application but does not persist them. Replace the
-stored refresh token after every successful refresh because HALO rotates it.
+Create the client once with the Project publishable key. Its `auth` member keeps
+the active session, rotates refresh tokens, and automatically sends both
+`apikey` and the current bearer access token.
 
 ```python
-from halo import HaloAuthClient
+from halo import create_client
 
-auth = HaloAuthClient(publishable_key="pk-project")
-
-session = auth.sign_in_with_password(
-    "user@example.com",
-    "Secret123!",
+halo = create_client(
+    "https://api.agihalo.com",
+    "pk-project",
 )
-refreshed = auth.refresh_session(session["refresh_token"])
-user = auth.get_user(refreshed["access_token"])
+
+session = halo.auth.sign_in_with_password({
+    "email": "user@example.com",
+    "password": "Secret123!",
+})
+user = halo.auth.get_user()
 ```
 
-For Google, Apple, GitHub, or Microsoft sign-in, generate an S256 PKCE pair and
-state, retain the verifier and state in the application session, then open the
-provider authorization URL:
+Python sessions remain in memory by default. A custom mapping or storage
+adapter can persist them when the client lifecycle requires it:
 
 ```python
-from halo import generate_oauth_state, generate_pkce_pair
-
-pkce = generate_pkce_pair()
-state = generate_oauth_state()
-
-authorization_url = auth.build_provider_authorize_url(
-    provider="google",
-    redirect_to="https://app.example.com/auth/callback",
-    code_challenge=pkce.challenge,
-    state=state,
-)
-
-# After validating the returned state:
-provider_session = auth.exchange_provider_code(
-    code=code,
-    code_verifier=pkce.verifier,
-    redirect_to="https://app.example.com/auth/callback",
+storage = {}
+halo = create_client(
+    "https://api.agihalo.com",
+    "pk-project",
+    {
+        "auth": {
+            "persist_session": True,
+            "storage": storage,
+        }
+    },
 )
 ```
 
-In a web application, keep refresh tokens in a Secure, HttpOnly,
-SameSite-protected application cookie behind a BFF. Do not place access or
-refresh tokens in URLs, logs, localStorage, or sessionStorage.
+The publishable key is public application identity, not a secret. Access and
+refresh tokens are bearer credentials. In a web application, keep them in a
+Secure, HttpOnly, SameSite-protected application cookie behind a BFF.
+
+The lower-level `HaloAuthClient` remains available for explicit token and PKCE
+handling.
 
 Services registered as HALO OAuth Apps use `HaloOAuthClient`:
 

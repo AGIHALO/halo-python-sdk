@@ -1,7 +1,10 @@
 import base64
 import hashlib
+import json
 import re
 import secrets
+import threading
+from datetime import datetime, timezone
 from typing import NamedTuple
 from urllib.parse import urlencode
 
@@ -313,6 +316,281 @@ class HaloAuthClient(_HaloJsonClient):
                 f"Bearer {_required_string(access_token, 'access_token')}"
             )
         return self._request(method, path, headers=headers, payload=payload)
+
+
+def _is_auth_session(value):
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("access_token"), str)
+        and bool(value["access_token"])
+        and isinstance(value.get("refresh_token"), str)
+        and bool(value["refresh_token"])
+        and isinstance(value.get("user"), dict)
+    )
+
+
+def _required_credentials(value):
+    if not isinstance(value, dict):
+        raise ValueError("credentials must be a dictionary")
+    return value
+
+
+class HaloAuthSubscription:
+    """A removable Project Authentication state-change subscription."""
+
+    def __init__(self, unsubscribe):
+        self._unsubscribe = unsubscribe
+
+    def unsubscribe(self):
+        if self._unsubscribe is None:
+            return
+        unsubscribe = self._unsubscribe
+        self._unsubscribe = None
+        unsubscribe()
+
+
+class HaloManagedAuth:
+    """Supabase-style session manager exposed as ``create_client(...).auth``."""
+
+    _REFRESH_MARGIN_SECONDS = 60
+
+    def __init__(
+        self,
+        client,
+        auto_refresh_token=True,
+        persist_session=False,
+        storage=None,
+        storage_key="halo-auth-token",
+    ):
+        self._client = client
+        self._auto_refresh_token = bool(auto_refresh_token)
+        self._persist_session = bool(persist_session)
+        self._storage = storage
+        self._storage_key = _required_string(storage_key, "storage_key")
+        self._session = None
+        self._listeners = {}
+        self._listener_sequence = 0
+        self._refresh_lock = threading.RLock()
+        self._restore_session()
+
+    def sign_up(self, credentials):
+        credentials = _required_credentials(credentials)
+        options = credentials.get("options") or {}
+        if not isinstance(options, dict):
+            raise ValueError("credentials.options must be a dictionary")
+        response = self._client.sign_up(
+            email=credentials.get("email"),
+            password=credentials.get("password"),
+            display_name=options.get("display_name"),
+            redirect_to=options.get("email_redirect_to"),
+            data=options.get("data"),
+        )
+        if _is_auth_session(response):
+            self._save_session(response, "SIGNED_IN")
+        return response
+
+    def sign_in_with_password(self, credentials):
+        credentials = _required_credentials(credentials)
+        response = self._client.sign_in_with_password(
+            credentials.get("email"),
+            credentials.get("password"),
+        )
+        self._save_session(response, "SIGNED_IN")
+        return response
+
+    def get_session(self):
+        self._refresh_if_needed()
+        return self._session
+
+    def get_user(self, jwt=None):
+        if jwt is None:
+            self._refresh_if_needed()
+            jwt = (
+                self._session.get("access_token")
+                if self._session is not None
+                else None
+            )
+        if not jwt:
+            raise ValueError("No active HALO Auth session")
+        return self._client.get_user(jwt)
+
+    def refresh_session(self, current_session=None):
+        with self._refresh_lock:
+            return self._refresh_session_locked(current_session)
+
+    def sign_out(self):
+        with self._refresh_lock:
+            if self._session is not None:
+                access_token = self._session.get("access_token")
+                if access_token:
+                    self._client.logout(access_token)
+            self._clear_session()
+
+    def reset_password_for_email(self, email, options=None):
+        options = options or {}
+        if not isinstance(options, dict):
+            raise ValueError("options must be a dictionary")
+        return self._client.request_password_recovery(
+            email,
+            options.get("redirect_to"),
+        )
+
+    def on_auth_state_change(self, callback):
+        if not callable(callback):
+            raise ValueError("callback must be callable")
+        self._listener_sequence += 1
+        listener_id = f"halo-auth-listener-{self._listener_sequence}"
+        self._listeners[listener_id] = callback
+        callback("INITIAL_SESSION", self._session)
+
+        def unsubscribe():
+            self._listeners.pop(listener_id, None)
+
+        return HaloAuthSubscription(unsubscribe)
+
+    def _restore_session(self):
+        if not self._persist_session or self._storage is None:
+            return
+        try:
+            stored = self._storage_get()
+            if isinstance(stored, str):
+                stored = json.loads(stored)
+            if _is_auth_session(stored):
+                self._session = stored
+            elif stored is not None:
+                self._storage_remove()
+        except (TypeError, ValueError, json.JSONDecodeError):
+            self._storage_remove()
+
+    def _refresh_if_needed(self):
+        if not self._auto_refresh_token or self._session is None:
+            return
+        if self._session_needs_refresh():
+            with self._refresh_lock:
+                if self._session_needs_refresh():
+                    self._refresh_session_locked()
+
+    def _session_needs_refresh(self):
+        if self._session is None:
+            return False
+        expires_at = self._session.get("expires_at")
+        if not isinstance(expires_at, str):
+            return False
+        try:
+            expiry = datetime.fromisoformat(
+                expires_at.replace("Z", "+00:00")
+            )
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return False
+        return (
+            expiry - datetime.now(timezone.utc)
+        ).total_seconds() <= self._REFRESH_MARGIN_SECONDS
+
+    def _refresh_session_locked(self, current_session=None):
+        refresh_token = None
+        if isinstance(current_session, str):
+            refresh_token = current_session
+        elif isinstance(current_session, dict):
+            refresh_token = current_session.get("refresh_token")
+        elif current_session is not None:
+            raise ValueError(
+                "current_session must be a dictionary, refresh token, or None"
+            )
+        if refresh_token is None and self._session is not None:
+            refresh_token = self._session.get("refresh_token")
+        if not refresh_token:
+            raise ValueError("No HALO Auth refresh token is available")
+        response = self._client.refresh_session(refresh_token)
+        self._save_session(response, "TOKEN_REFRESHED")
+        return response
+
+    def _save_session(self, session, event):
+        if not _is_auth_session(session):
+            raise ValueError("HALO Auth response did not include a session")
+        self._session = session
+        if self._persist_session and self._storage is not None:
+            self._storage_set(json.dumps(session))
+        self._notify(event, session)
+
+    def _clear_session(self):
+        self._session = None
+        if self._persist_session and self._storage is not None:
+            self._storage_remove()
+        self._notify("SIGNED_OUT", None)
+
+    def _notify(self, event, session):
+        for callback in list(self._listeners.values()):
+            try:
+                callback(event, session)
+            except Exception:
+                pass
+
+    def _storage_get(self):
+        if hasattr(self._storage, "get_item"):
+            return self._storage.get_item(self._storage_key)
+        if hasattr(self._storage, "get"):
+            return self._storage.get(self._storage_key)
+        raise ValueError("storage must implement get_item or get")
+
+    def _storage_set(self, value):
+        if hasattr(self._storage, "set_item"):
+            self._storage.set_item(self._storage_key, value)
+            return
+        if hasattr(self._storage, "__setitem__"):
+            self._storage[self._storage_key] = value
+            return
+        raise ValueError("storage must implement set_item or item assignment")
+
+    def _storage_remove(self):
+        if hasattr(self._storage, "remove_item"):
+            self._storage.remove_item(self._storage_key)
+            return
+        if hasattr(self._storage, "pop"):
+            self._storage.pop(self._storage_key, None)
+            return
+        raise ValueError("storage must implement remove_item or pop")
+
+
+class HaloClient:
+    """HALO application client with a managed Project Authentication surface."""
+
+    def __init__(
+        self,
+        halo_url,
+        publishable_key,
+        options=None,
+    ):
+        options = options or {}
+        if not isinstance(options, dict):
+            raise ValueError("options must be a dictionary")
+        auth_options = options.get("auth") or {}
+        if not isinstance(auth_options, dict):
+            raise ValueError("options.auth must be a dictionary")
+        raw_auth = HaloAuthClient(
+            publishable_key=publishable_key,
+            halo_url=halo_url,
+            timeout=options.get("timeout", 30),
+            session=options.get("session"),
+        )
+        self.auth = HaloManagedAuth(
+            raw_auth,
+            auto_refresh_token=auth_options.get(
+                "auto_refresh_token", True
+            ),
+            persist_session=auth_options.get("persist_session", False),
+            storage=auth_options.get("storage"),
+            storage_key=auth_options.get(
+                "storage_key", "halo-auth-token"
+            ),
+        )
+
+
+def create_client(halo_url, publishable_key, options=None):
+    """Create a HALO client whose ``auth`` member manages the user session."""
+
+    return HaloClient(halo_url, publishable_key, options)
 
 
 class HaloOAuthClient(_HaloJsonClient):

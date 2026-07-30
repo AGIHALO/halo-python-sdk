@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import json
 import unittest
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import Mock
@@ -9,6 +10,7 @@ from halo import (
     HaloAuthClient,
     HaloOAuthClient,
     __version__,
+    create_client,
     generate_oauth_state,
     generate_pkce_pair,
 )
@@ -233,6 +235,104 @@ class HaloAuthClientTest(unittest.TestCase):
         self.assertEqual(
             context.exception.code,
             "AUTH_RATE_LIMIT_EXCEEDED",
+        )
+
+    def test_create_client_manages_supabase_style_auth_session(self):
+        user = {
+            "id": "user-1",
+            "projectId": "project-1",
+            "email": "user@example.com",
+        }
+
+        def make_session(suffix):
+            return {
+                "access_token": f"access-{suffix}",
+                "refresh_token": f"refresh-{suffix}",
+                "token_type": "bearer",
+                "expires_in": 3600,
+                "expires_at": "2099-07-30T01:00:00.000Z",
+                "user": user,
+                "session": {
+                    "id": f"session-{suffix}",
+                    "projectId": "project-1",
+                    "authUserId": "user-1",
+                },
+            }
+
+        request_session = Mock()
+        request_session.request.side_effect = [
+            FakeResponse(payload=make_session("1")),
+            FakeResponse(payload={"user": user}),
+            FakeResponse(payload=make_session("2")),
+            FakeResponse(payload={}),
+        ]
+        storage = {}
+        halo = create_client(
+            "https://halo.test/",
+            "pk-project",
+            {
+                "session": request_session,
+                "auth": {
+                    "auto_refresh_token": False,
+                    "persist_session": True,
+                    "storage": storage,
+                    "storage_key": "test-halo-session",
+                },
+            },
+        )
+        events = []
+        subscription = halo.auth.on_auth_state_change(
+            lambda event, _: events.append(event)
+        )
+
+        signed_in = halo.auth.sign_in_with_password(
+            {
+                "email": "user@example.com",
+                "password": "Secret123!",
+            }
+        )
+        self.assertEqual(signed_in["access_token"], "access-1")
+        self.assertEqual(
+            json.loads(storage["test-halo-session"])["refresh_token"],
+            "refresh-1",
+        )
+        self.assertEqual(
+            halo.auth.get_session()["access_token"],
+            "access-1",
+        )
+        self.assertEqual(halo.auth.get_user()["user"]["id"], "user-1")
+        refreshed = halo.auth.refresh_session()
+        self.assertEqual(refreshed["refresh_token"], "refresh-2")
+        halo.auth.sign_out()
+        self.assertNotIn("test-halo-session", storage)
+        self.assertEqual(
+            events,
+            [
+                "INITIAL_SESSION",
+                "SIGNED_IN",
+                "TOKEN_REFRESHED",
+                "SIGNED_OUT",
+            ],
+        )
+        subscription.unsubscribe()
+
+        get_user_call = request_session.request.call_args_list[1]
+        self.assertEqual(
+            get_user_call.kwargs["headers"]["apikey"],
+            "pk-project",
+        )
+        self.assertEqual(
+            get_user_call.kwargs["headers"]["Authorization"],
+            "Bearer access-1",
+        )
+        logout_call = request_session.request.call_args_list[3]
+        self.assertEqual(
+            logout_call.kwargs["headers"]["apikey"],
+            "pk-project",
+        )
+        self.assertEqual(
+            logout_call.kwargs["headers"]["Authorization"],
+            "Bearer access-2",
         )
 
 
