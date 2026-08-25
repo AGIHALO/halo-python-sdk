@@ -1,7 +1,7 @@
 # HALO Python SDK
 
-The official Python client for HALO Project Authentication, OAuth Apps,
-long-term Memory, and server-driven x402 payments.
+The official Python client for HALO Project Authentication, Identity OAuth
+Clients, Agent Access, long-term Memory, and server-driven x402 payments.
 
 > **👼 proper noun [HALO (Hyper-Available Lifeline Oracle)]**:
 > A protocol where a dormant agent receives a temporary intelligence boost ("HALO") to survive a resource crunch (402 Error).
@@ -16,12 +16,13 @@ pip install .
 
 Python 3.9 or newer is required.
 
-## What's included in 0.3.0
+## What's included in 0.4.0
 
 - Supabase-style `create_client(url, publishable_key).auth` session management
 - Project user signup, password sessions, rotating refresh tokens, recovery,
   JWKS, and upstream provider login
-- OAuth App authorization-code, PKCE, refresh-token, and user-info flows
+- Identity OAuth Client authorization-code, PKCE, refresh-token, and user-info flows
+- Server-only Agent Access Link, installation, approval, execution, and revoke flows
 - Direct Memory capture, retrieve, deletion, and function execution
 - Server-driven x402 signing that uses the `payTo`, network, asset, amount, and
   timeout returned by `https://api.agihalo.com`
@@ -132,7 +133,7 @@ Secure, HttpOnly, SameSite-protected application cookie behind a BFF.
 The lower-level `HaloAuthClient` remains available for explicit token and PKCE
 handling.
 
-Services registered as HALO OAuth Apps use `HaloOAuthClient`:
+Services registered as HALO Identity OAuth Clients use `HaloOAuthClient`:
 
 ```python
 from halo import HaloOAuthClient, generate_oauth_state
@@ -153,6 +154,65 @@ tokens = oauth.exchange_code(
 )
 profile = oauth.get_user_info(tokens["access_token"])
 ```
+
+## Agent Access
+
+Use `HaloAgentAccessClient` only in the partner's trusted backend. Its API key
+must never be placed in a browser. Project Authentication stays independent;
+the Link request may identify a user with a verified Project access token or the
+partner's own `externalUserId`.
+
+```python
+import os
+from halo import HaloAgentAccessClient
+
+access = HaloAgentAccessClient(
+    api_key=os.environ["HALO_API_KEY"],
+    project_key="customer-project-a",
+)
+
+link = access.create_link(
+    client_agent_id="service-uuid",
+    end_user={"type": "external", "externalUserId": "partner-user-123"},
+    required_capabilities=[{
+        "capability": "calendar.event.read",
+        "resourceSelectors": [{"type": "calendar", "ids": ["primary"]}],
+    }],
+    optional_capabilities=[],
+    return_url="https://app.example.com/halo/complete",
+    state="partner-csrf-state",
+)
+
+# Send link["connectUrl"] to the browser. After HALO returns, query from the
+# trusted backend and take installationId only from this response.
+completed = access.get_link_session(link["session"]["id"])
+installation_id = completed["session"]["installationId"]
+```
+
+Create/write capabilities first create an input-bound approval, wait for the My
+Agent owner to approve it in `/my-agent/access`, and then execute with
+`approval_id`.
+
+```python
+approval = access.create_approval(
+    installation_id=installation_id,
+    function_id="google.calendar.event.create",
+    input={"calendarId": "primary", "summary": "Partner demo"},
+    idempotency_key="calendar-create-operation-uuid",
+)
+
+result = access.execute(
+    installation_id=installation_id,
+    function_id="google.calendar.event.create",
+    input={"calendarId": "primary", "summary": "Partner demo"},
+    idempotency_key="calendar-create-operation-uuid",
+    approval_id=approval["approval"]["id"],
+)
+```
+
+Partners do not register a Connected App OAuth Client with HALO. HALO owns and
+operates Connected App OAuth, token custody, incremental consent, allowlisted
+capability adapters, and audit. Raw Connected App tokens are never returned.
 
 ## Long-Term Memory
 

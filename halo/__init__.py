@@ -1,5 +1,6 @@
 from .client import (
     HaloAPIError,
+    HaloAgentAccessClient,
     HaloMemoryClient,
     HaloPaymentTools,
     MEMORY_RETRIEVE_FUNCTION_NAME,
@@ -21,6 +22,7 @@ from .version import __version__
 
 __all__ = [
     "HaloAPIError",
+    "HaloAgentAccessClient",
     "HaloAuthClient",
     "HaloAuthSubscription",
     "HaloClient",

@@ -340,143 +340,6 @@ class HaloMemoryClient:
             ),
         )
 
-    def list_connectors(self):
-        return self._get(
-            self._project_connection_path("/connectors")
-        )
-
-    def list_oauth_providers(self):
-        return self._get(
-            self._project_connection_path("/oauth/providers")
-        )
-
-    def register_oauth_provider(
-        self,
-        provider_key,
-        client_id,
-        client_secret,
-        redirect_uri,
-    ):
-        provider = requests.utils.quote(
-            _clean_memory_value(provider_key, "provider_key"), safe=""
-        )
-        return self._put(
-            self._project_connection_path(
-                f"/oauth/providers/{provider}"
-            ),
-            {
-                "clientId": _clean_memory_value(client_id, "client_id"),
-                "clientSecret": _clean_memory_value(
-                    client_secret, "client_secret"
-                ),
-                "redirectUri": _clean_memory_value(
-                    redirect_uri, "redirect_uri"
-                ),
-            },
-        )
-
-    def list_oauth_return_uris(self):
-        return self._get(
-            self._project_connection_path("/oauth/return-uris")
-        )
-
-    def register_oauth_return_uri(
-        self,
-        return_uri,
-        completion_mode,
-    ):
-        return self._post(
-            self._project_connection_path("/oauth/return-uris"),
-            {
-                "returnUri": _clean_memory_value(
-                    return_uri, "return_uri"
-                ),
-                "completionMode": _clean_memory_value(
-                    completion_mode, "completion_mode"
-                ),
-            },
-        )
-
-    def start_oauth(
-        self,
-        scope_id,
-        connector_id,
-        completion_mode,
-        optional_scopes=None,
-        return_uri=None,
-    ):
-        scope = requests.utils.quote(
-            _clean_memory_value(scope_id, "scope_id"), safe=""
-        )
-        payload = {
-            "connectorId": _clean_memory_value(
-                connector_id, "connector_id"
-            ),
-            "completionMode": _clean_memory_value(
-                completion_mode, "completion_mode"
-            ),
-        }
-        if optional_scopes is not None:
-            if (
-                not isinstance(optional_scopes, (list, tuple))
-                or any(
-                    not _clean_optional_string(value)
-                    for value in optional_scopes
-                )
-            ):
-                raise ValueError(
-                    "optional_scopes must contain only non-empty strings"
-                )
-            payload["optionalScopes"] = list(optional_scopes)
-        if return_uri is not None:
-            payload["returnUri"] = _clean_memory_value(
-                return_uri, "return_uri"
-            )
-        return self._post(
-            self._project_connection_path(
-                f"/scopes/{scope}/oauth/start"
-            ),
-            payload,
-        )
-
-    def get_oauth_session(self, session_id):
-        session = requests.utils.quote(
-            _clean_memory_value(session_id, "session_id"), safe=""
-        )
-        return self._get(
-            self._project_connection_path(
-                f"/oauth/sessions/{session}"
-            )
-        )
-
-    def list_connections(self, scope_id):
-        scope = requests.utils.quote(
-            _clean_memory_value(scope_id, "scope_id"), safe=""
-        )
-        return self._get(
-            self._project_connection_path(
-                f"/scopes/{scope}/connections"
-            )
-        )
-
-    def refresh_connection(self, scope_id, connection_id):
-        scope = requests.utils.quote(
-            _clean_memory_value(scope_id, "scope_id"), safe=""
-        )
-        connection = requests.utils.quote(
-            _clean_memory_value(connection_id, "connection_id"), safe=""
-        )
-        return self._post(
-            self._project_connection_path(
-                f"/scopes/{scope}/connections/{connection}/refresh"
-            ),
-            {},
-        )
-
-    def _project_connection_path(self, suffix):
-        project = requests.utils.quote(self.project_key, safe="")
-        return f"/api/v1/memory/projects/{project}{suffix}"
-
     def _headers(self) -> dict:
         return {
             "Authorization": f"Bearer {self.api_key}",
@@ -521,26 +384,6 @@ class HaloMemoryClient:
             )
         return self._parse_success_response(response)
 
-    def _put(self, path: str, payload: dict) -> dict:
-        try:
-            response = self.session.put(
-                f"{self.halo_url}{path}",
-                headers=self._headers(),
-                json=payload,
-                timeout=self.timeout,
-            )
-        except requests.RequestException as exc:
-            raise HaloAPIError(f"Halo API request failed: {exc}") from exc
-
-        if response.status_code < 200 or response.status_code >= 300:
-            message, body = self._error_message(response)
-            raise HaloAPIError(
-                message,
-                status_code=response.status_code,
-                response_body=body,
-            )
-        return self._parse_success_response(response)
-
     @staticmethod
     def _parse_success_response(response):
         try:
@@ -566,6 +409,218 @@ class HaloMemoryClient:
         if body:
             return f"Halo API request failed with status {response.status_code}: {body}", body
         return f"Halo API request failed with status {response.status_code}", body
+
+
+def _clean_agent_access_value(value, field_name):
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} is required for Halo Agent Access")
+    return value.strip()
+
+
+def _validate_capability_requests(value, field_name):
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"{field_name} must be a list for Halo Agent Access")
+    supported = {
+        "calendar.event.read",
+        "calendar.event.create",
+        "drive.file.read",
+        "drive.file.write",
+    }
+    normalized = []
+    for request_index, request in enumerate(value):
+        if not isinstance(request, dict):
+            raise ValueError(f"{field_name}[{request_index}] must be a dictionary")
+        capability = _clean_agent_access_value(
+            request.get("capability"),
+            f"{field_name}[{request_index}].capability",
+        )
+        if capability not in supported:
+            raise ValueError(f"Unsupported Halo Agent Access capability: {capability}")
+        selectors = request.get("resourceSelectors")
+        if not isinstance(selectors, (list, tuple)) or not selectors:
+            raise ValueError(
+                f"{field_name}[{request_index}].resourceSelectors is required"
+            )
+        normalized_selectors = []
+        for selector_index, selector in enumerate(selectors):
+            if not isinstance(selector, dict):
+                raise ValueError("Agent Access resource selector must be a dictionary")
+            resource_type = _clean_agent_access_value(
+                selector.get("type"),
+                f"{field_name}[{request_index}].resourceSelectors[{selector_index}].type",
+            )
+            ids = selector.get("ids")
+            if not isinstance(ids, (list, tuple)) or not ids:
+                raise ValueError("Agent Access resource selector ids are required")
+            normalized_selectors.append({
+                "type": resource_type,
+                "ids": [
+                    _clean_agent_access_value(resource_id, "resource id")
+                    for resource_id in ids
+                ],
+            })
+        normalized.append({
+            "capability": capability,
+            "resourceSelectors": normalized_selectors,
+        })
+    return normalized
+
+
+class HaloAgentAccessClient:
+    """Trusted-backend client for HALO Link and capability execution."""
+
+    def __init__(
+        self,
+        api_key,
+        project_key,
+        halo_url=DEFAULT_HALO_URL,
+        timeout=30,
+    ):
+        self.api_key = _clean_agent_access_value(api_key, "api_key")
+        self.project_key = _clean_agent_access_value(project_key, "project_key")
+        self.halo_url = _clean_agent_access_value(halo_url, "halo_url").rstrip("/")
+        self.timeout = timeout
+        self.session = requests.Session()
+
+    def create_link(
+        self,
+        client_agent_id,
+        end_user,
+        required_capabilities,
+        optional_capabilities,
+        return_url,
+        state,
+    ):
+        if not isinstance(end_user, dict) or end_user.get("type") not in (
+            "project_auth",
+            "external",
+        ):
+            raise ValueError(
+                "end_user.type must be project_auth or external for Halo Agent Access"
+            )
+        if end_user["type"] == "project_auth":
+            _clean_agent_access_value(end_user.get("accessToken"), "end_user.accessToken")
+        else:
+            _clean_agent_access_value(
+                end_user.get("externalUserId"), "end_user.externalUserId"
+            )
+        return self._request("post", "/link-sessions", {
+            "clientAgentId": _clean_agent_access_value(
+                client_agent_id, "client_agent_id"
+            ),
+            "endUser": dict(end_user),
+            "requiredCapabilities": _validate_capability_requests(
+                required_capabilities, "required_capabilities"
+            ),
+            "optionalCapabilities": _validate_capability_requests(
+                optional_capabilities, "optional_capabilities"
+            ),
+            "returnUrl": _clean_agent_access_value(return_url, "return_url"),
+            "state": _clean_agent_access_value(state, "state"),
+        })
+
+    def get_link_session(self, session_id):
+        session = requests.utils.quote(
+            _clean_agent_access_value(session_id, "session_id"), safe=""
+        )
+        return self._request("get", f"/link-sessions/{session}")
+
+    def list_installations(self):
+        return self._request("get", "/installations")
+
+    def revoke_installation(self, installation_id):
+        installation = requests.utils.quote(
+            _clean_agent_access_value(installation_id, "installation_id"), safe=""
+        )
+        return self._request("delete", f"/installations/{installation}")
+
+    def create_approval(
+        self,
+        installation_id,
+        function_id,
+        input,
+        idempotency_key=None,
+    ):
+        return self._request(
+            "post",
+            "/approvals",
+            self._execution_payload(
+                installation_id,
+                function_id,
+                input,
+                idempotency_key,
+            ),
+        )
+
+    def execute(
+        self,
+        installation_id,
+        function_id,
+        input,
+        idempotency_key=None,
+        approval_id=None,
+    ):
+        payload = self._execution_payload(
+            installation_id,
+            function_id,
+            input,
+            idempotency_key,
+        )
+        if approval_id is not None:
+            payload["approvalId"] = _clean_agent_access_value(
+                approval_id, "approval_id"
+            )
+        return self._request("post", "/executions", payload)
+
+    @staticmethod
+    def _execution_payload(
+        installation_id,
+        function_id,
+        input,
+        idempotency_key,
+    ):
+        payload = {
+            "installationId": _clean_agent_access_value(
+                installation_id, "installation_id"
+            ),
+            "functionId": _clean_agent_access_value(function_id, "function_id"),
+            "input": input,
+        }
+        if idempotency_key is not None:
+            payload["idempotencyKey"] = _clean_agent_access_value(
+                idempotency_key, "idempotency_key"
+            )
+        return payload
+
+    def _request(self, method, suffix, payload=None):
+        project = requests.utils.quote(self.project_key, safe="")
+        url = (
+            f"{self.halo_url}/api/v1/agent-access/projects/"
+            f"{project}{suffix}"
+        )
+        kwargs = {
+            "headers": {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "x-halo-sdk": HALO_SDK_NAME,
+                "x-halo-sdk-version": __version__,
+            },
+            "timeout": self.timeout,
+        }
+        if payload is not None:
+            kwargs["json"] = payload
+        try:
+            response = getattr(self.session, method)(url, **kwargs)
+        except requests.RequestException as exc:
+            raise HaloAPIError(f"Halo API request failed: {exc}") from exc
+        if response.status_code < 200 or response.status_code >= 300:
+            message, body = HaloMemoryClient._error_message(response)
+            raise HaloAPIError(
+                message,
+                status_code=response.status_code,
+                response_body=body,
+            )
+        return HaloMemoryClient._parse_success_response(response)
 
 # ============================================================================
 # 1. HALO System (All-in-One Auto Payment for SDK Users)

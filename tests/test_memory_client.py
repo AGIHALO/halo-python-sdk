@@ -1,7 +1,12 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from halo import HaloAPIError, HaloMemoryClient, MEMORY_RETRIEVE_FUNCTION_NAME
+from halo import (
+    HaloAPIError,
+    HaloAgentAccessClient,
+    HaloMemoryClient,
+    MEMORY_RETRIEVE_FUNCTION_NAME,
+)
 
 
 class FakeResponse:
@@ -172,47 +177,26 @@ class HaloMemoryClientTest(unittest.TestCase):
         self.assertIn("sessionData", declaration["parameters"]["required"])
 
     @patch("halo.client.requests.Session")
-    def test_delete_and_oauth_connection_helpers(self, session_class):
+    def test_delete_and_agent_access_helpers(self, session_class):
         session = Mock()
         session.post.return_value = FakeResponse(payload={"ok": True})
-        session.put.return_value = FakeResponse(payload={"ok": True})
         session.get.return_value = FakeResponse(payload={"ok": True})
+        session.delete.return_value = FakeResponse(payload={"ok": True})
         session_class.return_value = session
 
-        client = HaloMemoryClient(
+        memory = HaloMemoryClient(
             api_key="sk-test",
             project_key="oem project",
             halo_url="https://halo.test",
         )
 
-        client.delete_topic(
+        memory.delete_topic(
             end_user_key="end-user-1",
             topic_key="profile",
             include_raw=False,
         )
-        client.list_connectors()
-        client.register_oauth_provider(
-            provider_key="google",
-            client_id="google-client",
-            client_secret="google-secret",
-            redirect_uri=(
-                "https://connect.oem.test/"
-                "api/v1/memory/oauth/callback/google"
-            ),
-        )
-        client.register_oauth_return_uri(
-            return_uri="oemapp://oauth/complete",
-            completion_mode="mobile_deep_link",
-        )
-        client.start_oauth(
-            scope_id="scope-1",
-            connector_id="google.calendar",
-            completion_mode="mobile_deep_link",
-            return_uri="oemapp://oauth/complete",
-        )
-        client.refresh_connection("scope-1", "connection-1")
 
-        post_args, post_kwargs = session.post.call_args_list[0]
+        post_args, post_kwargs = session.post.call_args
         self.assertEqual(
             post_args[0],
             "https://halo.test/api/v1/memory/delete",
@@ -228,33 +212,70 @@ class HaloMemoryClientTest(unittest.TestCase):
             },
         )
 
-        get_args, _ = session.get.call_args
-        self.assertEqual(
-            get_args[0],
-            (
-                "https://halo.test/api/v1/memory/projects/"
-                "oem%20project/connectors"
-            ),
+        agent = HaloAgentAccessClient(
+            api_key="sk-test",
+            project_key="oem project",
+            halo_url="https://halo.test",
         )
+        agent.create_link(
+            client_agent_id="11111111-1111-4111-8111-111111111111",
+            end_user={"type": "external", "externalUserId": "end-user-1"},
+            required_capabilities=[{
+                "capability": "calendar.event.read",
+                "resourceSelectors": [{"type": "calendar", "ids": ["primary"]}],
+            }],
+            optional_capabilities=[],
+            return_url="https://app.example.com/halo/complete",
+            state="csrf-state",
+        )
+        agent.get_link_session("22222222-2222-4222-8222-222222222222")
+        agent.list_installations()
+        agent.create_approval(
+            installation_id="33333333-3333-4333-8333-333333333333",
+            function_id="google.calendar.event.create",
+            input={"calendarId": "primary", "summary": "Demo"},
+            idempotency_key="calendar-create-operation-1",
+        )
+        agent.execute(
+            installation_id="33333333-3333-4333-8333-333333333333",
+            function_id="google.calendar.event.create",
+            input={"calendarId": "primary", "summary": "Demo"},
+            idempotency_key="calendar-create-operation-1",
+            approval_id="44444444-4444-4444-8444-444444444444",
+        )
+        agent.revoke_installation("33333333-3333-4333-8333-333333333333")
 
-        put_args, put_kwargs = session.put.call_args
+        agent_session = session_class.return_value
+        agent_post_args, agent_post_kwargs = agent_session.post.call_args_list[1]
         self.assertEqual(
-            put_args[0],
-            (
-                "https://halo.test/api/v1/memory/projects/"
-                "oem%20project/oauth/providers/google"
-            ),
+            agent_post_args[0],
+            "https://halo.test/api/v1/agent-access/projects/oem%20project/link-sessions",
         )
         self.assertEqual(
-            put_kwargs["json"],
+            agent_post_kwargs["headers"]["Authorization"],
+            "Bearer sk-test",
+        )
+        self.assertEqual(
+            agent_post_kwargs["json"],
             {
-                "clientId": "google-client",
-                "clientSecret": "google-secret",
-                "redirectUri": (
-                    "https://connect.oem.test/"
-                    "api/v1/memory/oauth/callback/google"
-                ),
+                "clientAgentId": "11111111-1111-4111-8111-111111111111",
+                "endUser": {"type": "external", "externalUserId": "end-user-1"},
+                "requiredCapabilities": [{
+                    "capability": "calendar.event.read",
+                    "resourceSelectors": [{"type": "calendar", "ids": ["primary"]}],
+                }],
+                "optionalCapabilities": [],
+                "returnUrl": "https://app.example.com/halo/complete",
+                "state": "csrf-state",
             },
+        )
+        delete_args, _ = agent_session.delete.call_args
+        self.assertEqual(
+            delete_args[0],
+            (
+                "https://halo.test/api/v1/agent-access/projects/oem%20project/"
+                "installations/33333333-3333-4333-8333-333333333333"
+            ),
         )
 
 
